@@ -20,6 +20,9 @@
 .PARAMETER Reverse
     If specified, performs the inverse operation: moves folders from DestinationRoot back to their original locations.
 
+.PARAMETER MaxParallel
+    Maximum number of concurrent robocopy operations (1-8). Default: 3.
+
 .EXAMPLE
     .\Move-UserFolders.ps1 -DestinationRoot "D:\UserData"
 
@@ -49,14 +52,51 @@ param(
         "SavedGames",
         "Searches",
         "LocalAppData",
-        "RoamingAppData"
+        "RoamingAppData",
+        "LocalLow"
     ),
-
     [switch]$DryRun,
     [switch]$UpdateRegistry,
     [switch]$VerifyOnly,
-    [switch]$Reverse
+    [switch]$Reverse,
+
+    [ValidateRange(1, 8)]
+    [int]$MaxParallel = 3
 )
+
+# Elevate if not running as Administrator (unless in dry-run/verify-only mode)
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if (-not $DryRun -and -not $VerifyOnly) {
+        Write-Host "Restarting script with elevated privileges..." -ForegroundColor Yellow
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "powershell.exe"
+        
+        # Build arguments properly to handle arrays
+        $boundArgs = @{}
+        foreach ($param in $PSBoundParameters.Keys) {
+            $val = $PSBoundParameters[$param]
+            if ($val -is [Array]) {
+                $boundArgs[$param] = $val -join ','
+            } else {
+                $boundArgs[$param] = $val
+            }
+        }
+        
+        $argString = ""
+        foreach ($kvp in $boundArgs.GetEnumerator()) {
+            if ($kvp.Value -is [Boolean] -and $kvp.Value) {
+                $argString += " -$($kvp.Key)"
+            } elseif (-not ($kvp.Value -is [Boolean])) {
+                $argString += " -$($kvp.Key) $($kvp.Value)"
+            }
+        }
+        
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"$argString"
+        $psi.Verb = "runas"
+        [Diagnostics.Process]::Start($psi) | Out-Null
+        exit
+    }
+}
 
 # Robocopy flags from your specification
 $RobocopyFlags = @(
@@ -66,8 +106,8 @@ $RobocopyFlags = @(
     "/MT:8",     # Multi-threaded copy with 8 threads
     "/R:3",      # Retry 3 times on failed copies
     "/W:5",      # Wait 5 seconds between retries
-    "/COPY:DAT", # Copy Data, Attributes, Timestamps
-    "/DCOPY:DAT",# Copy Directory Data, Attributes, Timestamps
+    "/COPY:DATOS", # Copy Data, Attributes, Timestamps
+    "/DCOPY:DATOS",# Copy Directory Data, Attributes, Timestamps
     "/ETA"       # Show estimated time of arrival
 )
 
@@ -86,25 +126,25 @@ $ShellFolders = @{
     "Searches"      = "{7d1d3a04-debb-4115-95cf-2f29da2920da}"
     "AppData"       = "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}"
     "LocalAppData"  = "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}"
-}
+    "LocalLow"      = "{A520A1A4-1780-4FF6-BD18-167343C5AF16}"}
 
 function Get-CurrentUserFolderPath {
     param([string]$FolderName)
     
     $guid = $ShellFolders[$FolderName]
     if (-not $guid) { return $null }
-    
+
     # First, check if there's a custom path in User Shell Folders
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
     $value = Get-ItemProperty -Path $regPath -Name $guid -ErrorAction SilentlyContinue
-    
+
     if ($value -and $value.$guid) {
         $expanded = [Environment]::ExpandEnvironmentVariables($value.$guid)
         if (Test-Path $expanded) {
             return $expanded
         }
     }
-    
+
     # Fall back to default locations under %USERPROFILE%
     $defaultPaths = @{
         "Desktop"       = "$env:USERPROFILE\Desktop"
@@ -120,18 +160,17 @@ function Get-CurrentUserFolderPath {
         "Searches"      = "$env:USERPROFILE\Searches"
         "AppData"       = "$env:APPDATA"
         "LocalAppData"  = "$env:LOCALAPPDATA"
-    }
-    
+        "LocalLow"      = "$env:USERPROFILE\AppData\LocalLow"}
+
     if ($defaultPaths.ContainsKey($FolderName)) {
         $defaultPath = $defaultPaths[$FolderName]
         if (Test-Path $defaultPath) {
             return $defaultPath
         }
     }
-    
+
     return $null
 }
-
 function Set-UserFolderPath {
     param([string]$FolderName, [string]$NewPath)
     
@@ -158,16 +197,62 @@ Write-Host "Folders to process: $($FoldersToMove -join ', ')" -ForegroundColor Y
 Write-Host "Dry Run: $DryRun" -ForegroundColor Yellow
 Write-Host "Update Registry: $UpdateRegistry" -ForegroundColor Yellow
 Write-Host "Reverse Mode: $Reverse" -ForegroundColor Yellow
+Write-Host "Max Parallel: $MaxParallel" -ForegroundColor Yellow
 Write-Host ""
 
 $results = @()
 
-foreach ($folder in $FoldersToMove) {
-    Write-Host "Processing: $folder" -ForegroundColor Cyan
+# ScriptBlock for parallel robocopy execution
+$copyScriptBlock = {
+    param(
+        [string]$Folder,
+        [string]$SrcPath,
+        [string]$DstPath,
+        [string[]]$RobocopyFlags,
+        [bool]$UpdateRegistry,
+        [bool]$Reverse,
+        [string]$DestinationRoot,
+        [string]$UserProfilePath
+    )
+
+    $start = [System.Diagnostics.Stopwatch]::StartNew()
     
+    if (-not (Test-Path $DstPath)) {
+        New-Item -Path $DstPath -ItemType Directory -Force | Out-Null
+    }
+    
+    $robocopyArgs = @($SrcPath, $DstPath) + $RobocopyFlags
+    $exitCode = (Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru).ExitCode
+    
+    $start.Stop()
+    $success = $exitCode -le 3
+    
+    $result = [PSCustomObject]@{
+        Folder     = $Folder
+        Source     = $SrcPath
+        Destination = $DstPath
+        ExitCode   = $exitCode
+        Success    = $success
+        DurationMs = $start.ElapsedMilliseconds
+        Timestamp  = Get-Date
+    }
+    
+    if ($success -and $UpdateRegistry) {
+        if ($Reverse) {
+            $result | Add-Member -MemberType NoteProperty -Name 'RegistryPath' -Value (Join-Path $UserProfilePath $Folder)
+        } else {
+            $result | Add-Member -MemberType NoteProperty -Name 'RegistryPath' -Value $DstPath
+        }
+    }
+    
+    return $result
+}
+
+# Build work items (validate paths first, like before)
+$workItems = @()
+foreach ($folder in $FoldersToMove) {
     $sourcePath = Get-CurrentUserFolderPath -FolderName $folder
     
-    # Determine source and destination based on direction for validation
     if ($Reverse) {
         $srcPath = Join-Path $DestinationRoot $folder
         $dstPath = $sourcePath
@@ -177,28 +262,21 @@ foreach ($folder in $FoldersToMove) {
     }
     
     if (-not $sourcePath) {
-        Write-Warning "  Could not locate source path for $folder (may not exist or be redirected)"
+        Write-Warning "Could not locate source path for $folder"
         $results += [PSCustomObject]@{
-            Folder = $folder
-            Status = "Not Found"
-            Source = "N/A"
-            Destination = "N/A"
+            Folder = $folder; Status = "Not Found"; Source = "N/A"; Destination = "N/A"; ExitCode = $null
         }
         continue
     }
     
     if (-not (Test-Path $srcPath)) {
-        Write-Warning "  Source path does not exist: $srcPath"
+        Write-Warning "Source path does not exist: $srcPath"
         $results += [PSCustomObject]@{
-            Folder = $folder
-            Status = "Source Missing"
-            Source = $srcPath
-            Destination = "N/A"
+            Folder = $folder; Status = "Source Missing"; Source = $srcPath; Destination = "N/A"; ExitCode = $null
         }
         continue
     }
     
-    # Determine source and destination based on direction
     if ($Reverse) {
         $srcPath = Join-Path $DestinationRoot $folder
         $dstPath = $sourcePath
@@ -207,77 +285,93 @@ foreach ($folder in $FoldersToMove) {
         $dstPath = Join-Path $DestinationRoot $folder
     }
     
-    Write-Host "  Source:      $srcPath" -ForegroundColor Gray
-    Write-Host "  Destination: $dstPath" -ForegroundColor Gray
-    
     if ($DryRun -or $VerifyOnly) {
+        Write-Host "Processing: $folder" -ForegroundColor Cyan
+        Write-Host "  Source:      $srcPath" -ForegroundColor Gray
+        Write-Host "  Destination: $dstPath" -ForegroundColor Gray
         Write-Host "  [DRY RUN] Would run: robocopy `"$srcPath`" `"$dstPath`" $($RobocopyFlags -join ' ')" -ForegroundColor Yellow
         $results += [PSCustomObject]@{
-            Folder = $folder
-            Status = "Dry Run"
-            Source = $srcPath
-            Destination = $dstPath
+            Folder = $folder; Status = "Dry Run"; Source = $srcPath; Destination = $dstPath; ExitCode = $null
         }
-        continue
+        Write-Host ""; continue
     }
     
-    # Ensure destination directory exists
-    if (-not (Test-Path $dstPath)) {
-        New-Item -Path $dstPath -ItemType Directory -Force | Out-Null
+    $workItems += [PSCustomObject]@{
+        Folder = $folder; SrcPath = $srcPath; DstPath = $dstPath
     }
+}
+
+# Execute in parallel using Runspace Pool
+if ($workItems.Count -gt 0) {
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, $MaxParallel)
+    $pool.Open()
     
-    # Run robocopy
-    $robocopyArgs = @($srcPath, $dstPath) + $RobocopyFlags
-    Write-Host "  Running robocopy..." -ForegroundColor Gray
+    $powershellInstances = @()
+    $asyncResults = @()
     
-    $exitCode = (Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru).ExitCode
-    
-    # Robocopy exit codes:
-    # 0 = No files copied, no failure
-    # 1 = All files copied successfully
-    # 2 = Extra files/dirs in destination (not an error)
-    # 3 = 1 + 2
-    # 4 = Mismatched files/dirs
-    # 5 = 4 + 1
-    # 6 = 4 + 2
-    # 7 = 4 + 1 + 2
-    # >= 8 = Error
-    
-    $success = $exitCode -le 3
-    
-    if ($success) {
-        Write-Host "  Copy completed (exit code: $exitCode)" -ForegroundColor Green
+    try {
+        foreach ($item in $workItems) {
+            $ps = [PowerShell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript($copyScriptBlock)
+            [void]$ps.AddArgument($item.Folder)
+            [void]$ps.AddArgument($item.SrcPath)
+            [void]$ps.AddArgument($item.DstPath)
+            [void]$ps.AddArgument($RobocopyFlags)
+            [void]$ps.AddArgument($UpdateRegistry)
+            [void]$ps.AddArgument($Reverse)
+            [void]$ps.AddArgument($DestinationRoot)
+            [void]$ps.AddArgument($env:USERPROFILE)
+            $async = $ps.BeginInvoke()
+            $powershellInstances += $ps
+            $asyncResults += $async
+        }
         
-        if ($UpdateRegistry) {
-            # For reverse, restore to default location (%USERPROFILE%\FolderName)
-            if ($Reverse) {
-                $defaultPath = Join-Path $env:USERPROFILE $folder
-                Set-UserFolderPath -FolderName $folder -NewPath $defaultPath
-            } else {
-                Set-UserFolderPath -FolderName $folder -NewPath $dstPath
+        $completed = 0; $total = $asyncResults.Count
+        while ($completed -lt $total) {
+            for ($i = 0; $i -lt $total; $i++) {
+                $ar = $asyncResults[$i]
+                if ($ar -and $ar.IsCompleted -and -not $ar.AsyncWaitHandle.SafeWaitHandle.IsClosed) {
+                    try {
+                        $result = $powershellInstances[$i].EndInvoke($ar)
+                        if ($result.Success) {
+                            Write-Host "Processing: $($result.Folder)" -ForegroundColor Cyan
+                            Write-Host "  Source:      $($result.Source)" -ForegroundColor Gray
+                            Write-Host "  Destination: $($result.Destination)" -ForegroundColor Gray
+                            Write-Host "  Copy completed (exit code: $($result.ExitCode), ${result.DurationMs}ms)" -ForegroundColor Green
+                            if ($UpdateRegistry -and $result.RegistryPath) {
+                                if ($Reverse) { Set-UserFolderPath -FolderName $result.Folder -NewPath (Join-Path $env:USERPROFILE $result.Folder) }
+                                else { Set-UserFolderPath -FolderName $result.Folder -NewPath $result.RegistryPath }
+                            }
+                            $results += [PSCustomObject]@{
+                                Folder = $result.Folder; Status = "Success"; Source = $result.Source; Destination = $result.Destination; ExitCode = $result.ExitCode
+                            }
+                        } else {
+                            Write-Host "Processing: $($result.Folder)" -ForegroundColor Cyan
+                            Write-Host "  Source:      $($result.Source)" -ForegroundColor Gray
+                            Write-Host "  Destination: $($result.Destination)" -ForegroundColor Gray
+                            Write-Error "  Copy FAILED (exit code: $($result.ExitCode), ${result.DurationMs}ms)"
+                            $results += [PSCustomObject]@{
+                                Folder = $result.Folder; Status = "Failed"; Source = $result.Source; Destination = $result.Destination; ExitCode = $result.ExitCode
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Error "  Exception: $($_.Exception.Message)"
+                        $results += [PSCustomObject]@{
+                            Folder = $item.Folder; Status = "Failed"; Source = $item.SrcPath; Destination = $item.DstPath; ExitCode = -1
+                        }
+                    }
+                    $asyncResults[$i] = $null; $completed++; Write-Host ""
+                }
             }
-        }
-        
-        $results += [PSCustomObject]@{
-            Folder = $folder
-            Status = "Success"
-            Source = $srcPath
-            Destination = $dstPath
-            ExitCode = $exitCode
+            if ($completed -lt $total) { Start-Sleep -Milliseconds 200 }
         }
     }
-    else {
-        Write-Error "  Copy FAILED (exit code: $exitCode)"
-        $results += [PSCustomObject]@{
-            Folder = $folder
-            Status = "Failed"
-            Source = $srcPath
-            Destination = $dstPath
-            ExitCode = $exitCode
-        }
+    finally {
+        foreach ($ps in $powershellInstances) { $ps.Dispose() }
+        $pool.Close(); $pool.Dispose()
     }
-    
-    Write-Host ""
 }
 
 # Summary
@@ -296,3 +390,5 @@ elseif (-not $DryRun -and -not $VerifyOnly) {
         Write-Host "Registry updated. You may need to log off/on or restart explorer.exe for changes to take effect." -ForegroundColor Yellow
     }
 }
+
+
