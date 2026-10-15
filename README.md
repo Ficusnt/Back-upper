@@ -9,6 +9,7 @@ PowerShell script to move Windows user profile folders (Documents, Pictures, Mus
 - Supports all known shell folders: Desktop, Documents, Downloads, Music, Pictures, Videos, Favorites, Contacts, Links, SavedGames, Searches, AppData, LocalAppData
 - Dry-run mode to preview changes
 - Optional registry update so Windows uses the new locations
+- **Reverse mode** to restore folders from destination back to original locations
 - Detailed summary with exit codes
 
 ## Usage
@@ -22,6 +23,15 @@ PowerShell script to move Windows user profile folders (Documents, Pictures, Mus
 
 # Move all folders and update registry (run as Administrator)
 .\Move-UserFolders.ps1 -DestinationRoot "D:\UserData" -UpdateRegistry
+
+# Restore folders from destination back to original locations
+.\Move-UserFolders.ps1 -DestinationRoot "D:\UserData" -Reverse
+
+# Restore with registry update (run as Administrator)
+.\Move-UserFolders.ps1 -DestinationRoot "D:\UserData" -Reverse -UpdateRegistry
+
+# Dry run of restore operation
+.\Move-UserFolders.ps1 -DestinationRoot "D:\UserData" -Reverse -DryRun
 ```
 
 ## Parameters
@@ -33,6 +43,7 @@ PowerShell script to move Windows user profile folders (Documents, Pictures, Mus
 | `-DryRun` | No | Show commands without executing |
 | `-UpdateRegistry` | No | Update `HKCU:\...\User Shell Folders` after copy |
 | `-VerifyOnly` | No | Alias for `-DryRun` |
+| `-Reverse` | No | Perform inverse operation: move from DestinationRoot back to original locations |
 
 ## Robocopy Flags Used
 

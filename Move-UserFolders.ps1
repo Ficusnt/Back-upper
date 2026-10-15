@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-    Moves Windows user profile folders (Documents, Pictures, Music, Videos, etc.) to a new location using robocopy.
+    Moves or restores Windows user profile folders (Documents, Pictures, Music, Videos, etc.) to/from a new location using robocopy.
 
 .DESCRIPTION
     This script uses robocopy to copy user profile folders to a new destination,
     then optionally updates the Windows shell folder registry keys to point to the new location.
+    Use -Reverse to move folders back from the destination to their original locations.
     Run as Administrator for best results.
 
 .PARAMETER DestinationRoot
@@ -16,11 +17,17 @@
 .PARAMETER DryRun
     If specified, shows what would be done without making changes.
 
+.PARAMETER Reverse
+    If specified, performs the inverse operation: moves folders from DestinationRoot back to their original locations.
+
 .EXAMPLE
     .\Move-UserFolders.ps1 -DestinationRoot "D:\UserData"
 
 .EXAMPLE
     .\Move-UserFolders.ps1 -DestinationRoot "E:\Profiles" -FoldersToMove "Documents","Pictures","Music" -DryRun
+
+.EXAMPLE
+    .\Move-UserFolders.ps1 -DestinationRoot "D:\UserData" -Reverse -UpdateRegistry
 #>
 
 [CmdletBinding()]
@@ -45,7 +52,8 @@ param(
 
     [switch]$DryRun,
     [switch]$UpdateRegistry,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$Reverse
 )
 
 # Robocopy flags from your specification
@@ -147,6 +155,7 @@ Write-Host "Destination Root: $DestinationRoot" -ForegroundColor Yellow
 Write-Host "Folders to process: $($FoldersToMove -join ', ')" -ForegroundColor Yellow
 Write-Host "Dry Run: $DryRun" -ForegroundColor Yellow
 Write-Host "Update Registry: $UpdateRegistry" -ForegroundColor Yellow
+Write-Host "Reverse Mode: $Reverse" -ForegroundColor Yellow
 Write-Host ""
 
 $results = @()
@@ -155,6 +164,15 @@ foreach ($folder in $FoldersToMove) {
     Write-Host "Processing: $folder" -ForegroundColor Cyan
     
     $sourcePath = Get-CurrentUserFolderPath -FolderName $folder
+    
+    # Determine source and destination based on direction for validation
+    if ($Reverse) {
+        $srcPath = Join-Path $DestinationRoot $folder
+        $dstPath = $sourcePath
+    } else {
+        $srcPath = $sourcePath
+        $dstPath = Join-Path $DestinationRoot $folder
+    }
     
     if (-not $sourcePath) {
         Write-Warning "  Could not locate source path for $folder (may not exist or be redirected)"
@@ -167,40 +185,47 @@ foreach ($folder in $FoldersToMove) {
         continue
     }
     
-    if (-not (Test-Path $sourcePath)) {
-        Write-Warning "  Source path does not exist: $sourcePath"
+    if (-not (Test-Path $srcPath)) {
+        Write-Warning "  Source path does not exist: $srcPath"
         $results += [PSCustomObject]@{
             Folder = $folder
             Status = "Source Missing"
-            Source = $sourcePath
+            Source = $srcPath
             Destination = "N/A"
         }
         continue
     }
     
-    $destPath = Join-Path $DestinationRoot $folder
+    # Determine source and destination based on direction
+    if ($Reverse) {
+        $srcPath = Join-Path $DestinationRoot $folder
+        $dstPath = $sourcePath
+    } else {
+        $srcPath = $sourcePath
+        $dstPath = Join-Path $DestinationRoot $folder
+    }
     
-    Write-Host "  Source:      $sourcePath" -ForegroundColor Gray
-    Write-Host "  Destination: $destPath" -ForegroundColor Gray
+    Write-Host "  Source:      $srcPath" -ForegroundColor Gray
+    Write-Host "  Destination: $dstPath" -ForegroundColor Gray
     
     if ($DryRun -or $VerifyOnly) {
-        Write-Host "  [DRY RUN] Would run: robocopy `"$sourcePath`" `"$destPath`" $($RobocopyFlags -join ' ')" -ForegroundColor Yellow
+        Write-Host "  [DRY RUN] Would run: robocopy `"$srcPath`" `"$dstPath`" $($RobocopyFlags -join ' ')" -ForegroundColor Yellow
         $results += [PSCustomObject]@{
             Folder = $folder
             Status = "Dry Run"
-            Source = $sourcePath
-            Destination = $destPath
+            Source = $srcPath
+            Destination = $dstPath
         }
         continue
     }
     
     # Ensure destination directory exists
-    if (-not (Test-Path $destPath)) {
-        New-Item -Path $destPath -ItemType Directory -Force | Out-Null
+    if (-not (Test-Path $dstPath)) {
+        New-Item -Path $dstPath -ItemType Directory -Force | Out-Null
     }
     
     # Run robocopy
-    $robocopyArgs = @($sourcePath, $destPath) + $RobocopyFlags
+    $robocopyArgs = @($srcPath, $dstPath) + $RobocopyFlags
     Write-Host "  Running robocopy..." -ForegroundColor Gray
     
     $exitCode = (Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru).ExitCode
@@ -222,14 +247,20 @@ foreach ($folder in $FoldersToMove) {
         Write-Host "  Copy completed (exit code: $exitCode)" -ForegroundColor Green
         
         if ($UpdateRegistry) {
-            Set-UserFolderPath -FolderName $folder -NewPath $destPath
+            # For reverse, restore to default location (%USERPROFILE%\FolderName)
+            if ($Reverse) {
+                $defaultPath = Join-Path $env:USERPROFILE $folder
+                Set-UserFolderPath -FolderName $folder -NewPath $defaultPath
+            } else {
+                Set-UserFolderPath -FolderName $folder -NewPath $dstPath
+            }
         }
         
         $results += [PSCustomObject]@{
             Folder = $folder
             Status = "Success"
-            Source = $sourcePath
-            Destination = $destPath
+            Source = $srcPath
+            Destination = $dstPath
             ExitCode = $exitCode
         }
     }
@@ -238,8 +269,8 @@ foreach ($folder in $FoldersToMove) {
         $results += [PSCustomObject]@{
             Folder = $folder
             Status = "Failed"
-            Source = $sourcePath
-            Destination = $destPath
+            Source = $srcPath
+            Destination = $dstPath
             ExitCode = $exitCode
         }
     }
