@@ -6,7 +6,7 @@ PowerShell script to move Windows user profile folders (Documents, Pictures, Mus
 
 - Uses `robocopy` with restartable, multi-threaded copy (`/Z /MT:8`)
 - Auto-detects actual folder locations (handles OneDrive redirection, custom paths)
-- Supports all known shell folders: Desktop, Documents, Downloads, Music, Pictures, Videos, Favorites, Contacts, Links, SavedGames, Searches, AppData, LocalAppData
+- Supports all known shell folders: Desktop, Documents, Downloads, Music, Pictures, Videos, Favorites, Contacts, Links, SavedGames, Searches, LocalAppData, RoamingAppData
 - Dry-run mode to preview changes
 - Optional registry update so Windows uses the new locations
 - **Reverse mode** to restore folders from destination back to original locations

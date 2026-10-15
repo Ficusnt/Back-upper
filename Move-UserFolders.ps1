@@ -47,7 +47,9 @@ param(
         "Contacts",
         "Links",
         "SavedGames",
-        "Searches"
+        "Searches",
+        "LocalAppData",
+        "RoamingAppData"
     ),
 
     [switch]$DryRun,
