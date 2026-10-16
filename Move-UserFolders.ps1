@@ -84,16 +84,27 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
         
         $argString = ""
         foreach ($kvp in $boundArgs.GetEnumerator()) {
-            if ($kvp.Value -is [Boolean] -and $kvp.Value) {
-                $argString += " -$($kvp.Key)"
-            } elseif (-not ($kvp.Value -is [Boolean])) {
+            if ($kvp.Value -is [Boolean]) {
+                if ($kvp.Value) {
+                    $argString += " -$($kvp.Key)"
+                }
+            } elseif ($kvp.Value -is [Array]) {
+                $arrayString = $kvp.Value -join ','
+                $argString += " -$($kvp.Key) $arrayString"
+            } else {
                 $argString += " -$($kvp.Key) $($kvp.Value)"
             }
         }
         
         $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"$argString"
         $psi.Verb = "runas"
-        [Diagnostics.Process]::Start($psi) | Out-Null
+        try {
+            [Diagnostics.Process]::Start($psi) | Out-Null
+        } catch {
+            Write-Warning "Failed to start elevated process: $_"
+            Write-Host "Please run the script as Administrator manually." -ForegroundColor Red
+            exit 1
+        }
         exit
     }
 }
@@ -111,6 +122,33 @@ $RobocopyFlags = @(
     "/XJD",      # Exclude directory junction points (prevents infinite loops)
     "/ETA"       # Show estimated time of arrival
 )
+
+# Function to get human-readable description of robocopy exit codes
+function Get-RobocopyExitCodeDescription {
+    param(
+        [int]$ExitCode
+    )
+    
+    switch ($ExitCode) {
+        0 { return "No files copied, no failure - source and destination are synchronized" }
+        1 { return "All files copied successfully" }
+        2 { return "Some extra files or directories detected - synchronization needed" }
+        3 { return "Some files copied, some extra files/directories detected" }
+        5 { return "Some files copied, some files mismatched" }
+        6 { return "Some files copied, some files mismatched, some extra files/directories detected" }
+        7 { return "Some files copied, some files mismatched, some extra files/directories detected" }
+        8 { return "Some files copied, some files mismatched, some extra files/directories detected" }
+        9 { return "Some files copied, some files failed (access denied, locked, or in use)" }
+        10 { return "Some files copied, some files failed, some extra files/directories detected" }
+        11 { return "Some files copied, some files failed, some extra files/directories detected, some files mismatched" }
+        12 { return "Some files or directories failed to copy (serious error)" }
+        13 { return "Source directory was invalid" }
+        14 { return "Destination directory was invalid" }
+        15 { return "Invalid parameter passed to robocopy" }
+        16 { return "Invalid source or destination directory" }
+        default { return "Unknown exit code ($ExitCode)" }
+    }
+}
 
 # Known shell folder registry mappings
 $ShellFolders = @{
@@ -341,7 +379,8 @@ if ($workItems.Count -gt 0) {
                             Write-Host "Processing: $($result.Folder)" -ForegroundColor Cyan
                             Write-Host "  Source:      $($result.Source)" -ForegroundColor Gray
                             Write-Host "  Destination: $($result.Destination)" -ForegroundColor Gray
-                            Write-Host "  Copy completed (exit code: $($result.ExitCode), ${result.DurationMs}ms)" -ForegroundColor Green
+                            $exitDesc = Get-RobocopyExitCodeDescription -ExitCode $result.ExitCode
+Write-Host "  Copy completed (exit code: $($result.ExitCode) - $exitDesc, ${result.DurationMs}ms)" -ForegroundColor Green
                             if ($UpdateRegistry -and $result.RegistryPath) {
                                 if ($Reverse) { Set-UserFolderPath -FolderName $result.Folder -NewPath (Join-Path $env:USERPROFILE $result.Folder) }
                                 else { Set-UserFolderPath -FolderName $result.Folder -NewPath $result.RegistryPath }
