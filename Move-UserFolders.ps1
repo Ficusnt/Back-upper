@@ -106,8 +106,8 @@ $RobocopyFlags = @(
     "/MT:8",     # Multi-threaded copy with 8 threads
     "/R:3",      # Retry 3 times on failed copies
     "/W:5",      # Wait 5 seconds between retries
-    "/COPY:DATOS", # Copy Data, Attributes, Timestamps
-    "/DCOPY:DATOS",# Copy Directory Data, Attributes, Timestamps
+    "/COPY:DAT", # Copy Data, Attributes, Timestamps
+    "/DCOPY:DAT",# Copy Directory Data, Attributes, Timestamps
     "/ETA"       # Show estimated time of arrival
 )
 
