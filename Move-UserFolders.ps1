@@ -108,6 +108,7 @@ $RobocopyFlags = @(
     "/W:5",      # Wait 5 seconds between retries
     "/COPY:DAT", # Copy Data, Attributes, Timestamps
     "/DCOPY:DAT",# Copy Directory Data, Attributes, Timestamps
+    "/XJD",      # Exclude directory junction points (prevents infinite loops)
     "/ETA"       # Show estimated time of arrival
 )
 
@@ -125,6 +126,7 @@ $ShellFolders = @{
     "SavedGames"    = "{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}"
     "Searches"      = "{7d1d3a04-debb-4115-95cf-2f29da2920da}"
     "AppData"       = "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}"
+    "RoamingAppData" = "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}"
     "LocalAppData"  = "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}"
     "LocalLow"      = "{A520A1A4-1780-4FF6-BD18-167343C5AF16}"}
 
@@ -159,6 +161,7 @@ function Get-CurrentUserFolderPath {
         "SavedGames"    = "$env:USERPROFILE\Saved Games"
         "Searches"      = "$env:USERPROFILE\Searches"
         "AppData"       = "$env:APPDATA"
+        "RoamingAppData" = "$env:APPDATA"
         "LocalAppData"  = "$env:LOCALAPPDATA"
         "LocalLow"      = "$env:USERPROFILE\AppData\LocalLow"}
 
@@ -225,7 +228,7 @@ $copyScriptBlock = {
     $exitCode = (Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru).ExitCode
     
     $start.Stop()
-    $success = $exitCode -le 3
+    $success = $exitCode -le 11
     
     $result = [PSCustomObject]@{
         Folder     = $Folder
